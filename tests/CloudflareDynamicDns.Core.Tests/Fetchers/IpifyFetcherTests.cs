@@ -1,36 +1,36 @@
 using System.Net;
 using CloudflareDynamicDns.Core.Fetchers;
+using CloudflareDynamicDns.Core.Tests.Helpers;
 using Moq;
-using Moq.Protected;
 using Xunit;
+using static CloudflareDynamicDns.Core.Tests.Helpers.TestHttpResponses;
 
 namespace CloudflareDynamicDns.Core.Tests.Fetchers;
 
 public class IpifyFetcherTests
 {
-    private static HttpClient CreateHttpClient(HttpMessageHandler handler) =>
-        new(handler);
-
-    private static Mock<HttpMessageHandler> SetupHandler(HttpStatusCode statusCode, string content)
+    [Fact]
+    public async Task FetchIpAddressAsync_RequestsIpifyEndpointWithGet_OnSuccess()
     {
         var handlerMock = new Mock<HttpMessageHandler>();
-        handlerMock
-            .Protected()
-            .Setup<Task<HttpResponseMessage>>("SendAsync",
-                ItExpr.IsAny<HttpRequestMessage>(),
-                ItExpr.IsAny<CancellationToken>())
-            .ReturnsAsync(new HttpResponseMessage(statusCode)
-            {
-                Content = new StringContent(content)
-            });
-        return handlerMock;
+        var requests = handlerMock.SetupSendAsync(_ => TextResponse("1.2.3.4"));
+        using var httpClient = new HttpClient(handlerMock.Object);
+        var fetcher = new IpifyFetcher(httpClient);
+
+        await fetcher.FetchIpAddressAsync();
+
+        var request = Assert.Single(requests);
+        Assert.Equal(HttpMethod.Get, request.Method);
+        Assert.Equal("https://api.ipify.org/", request.Url);
     }
 
     [Fact]
-    public async Task FetchIpAddressAsync_ReturnsIpAddress_OnSuccess()
+    public async Task FetchIpAddressAsync_ReturnsTrimmedIpAddress_OnSuccess()
     {
-        var handlerMock = SetupHandler(HttpStatusCode.OK, "  1.2.3.4  ");
-        var fetcher = new IpifyFetcher(CreateHttpClient(handlerMock.Object));
+        var handlerMock = new Mock<HttpMessageHandler>();
+        handlerMock.SetupSendAsync(_ => TextResponse("  1.2.3.4  "));
+        using var httpClient = new HttpClient(handlerMock.Object);
+        var fetcher = new IpifyFetcher(httpClient);
 
         var result = await fetcher.FetchIpAddressAsync();
 
@@ -38,19 +38,71 @@ public class IpifyFetcherTests
     }
 
     [Fact]
+    public async Task FetchIpAddressAsync_ReturnsTrimmedIpv6Address_OnSuccess()
+    {
+        var handlerMock = new Mock<HttpMessageHandler>();
+        handlerMock.SetupSendAsync(_ => TextResponse("2001:db8::1\n"));
+        using var httpClient = new HttpClient(handlerMock.Object);
+        var fetcher = new IpifyFetcher(httpClient);
+
+        var result = await fetcher.FetchIpAddressAsync();
+
+        Assert.Equal("2001:db8::1", result);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("\r\n")]
+    public async Task FetchIpAddressAsync_ReturnsEmptyString_WhenBodyIsEmptyOrWhitespace(string body)
+    {
+        var handlerMock = new Mock<HttpMessageHandler>();
+        handlerMock.SetupSendAsync(_ => TextResponse(body));
+        using var httpClient = new HttpClient(handlerMock.Object);
+        var fetcher = new IpifyFetcher(httpClient);
+
+        var result = await fetcher.FetchIpAddressAsync();
+
+        Assert.Equal(string.Empty, result);
+    }
+
+    [Fact]
     public async Task FetchIpAddressAsync_ReturnsErrorMessage_OnHttpFailure()
     {
         var handlerMock = new Mock<HttpMessageHandler>();
-        handlerMock
-            .Protected()
-            .Setup<Task<HttpResponseMessage>>("SendAsync",
-                ItExpr.IsAny<HttpRequestMessage>(),
-                ItExpr.IsAny<CancellationToken>())
-            .ThrowsAsync(new HttpRequestException("Network error"));
-        var fetcher = new IpifyFetcher(CreateHttpClient(handlerMock.Object));
+        handlerMock.SetupThrows(new HttpRequestException("Network error"));
+        using var httpClient = new HttpClient(handlerMock.Object);
+        var fetcher = new IpifyFetcher(httpClient);
 
         var result = await fetcher.FetchIpAddressAsync();
 
         Assert.StartsWith("Error:", result);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    [InlineData(HttpStatusCode.NotFound)]
+    public async Task FetchIpAddressAsync_ReturnsErrorMessage_OnNonSuccessStatusCode(HttpStatusCode statusCode)
+    {
+        var handlerMock = new Mock<HttpMessageHandler>();
+        handlerMock.SetupSendAsync(_ => TextResponse("upstream failure", statusCode));
+        using var httpClient = new HttpClient(handlerMock.Object);
+        var fetcher = new IpifyFetcher(httpClient);
+
+        var result = await fetcher.FetchIpAddressAsync();
+
+        Assert.StartsWith("Error:", result);
+    }
+
+    [Fact]
+    public async Task FetchIpAddressAsync_Throws_WhenRequestTimesOut()
+    {
+        var handlerMock = new Mock<HttpMessageHandler>();
+        handlerMock.SetupThrows(new TaskCanceledException("The request timed out."));
+        using var httpClient = new HttpClient(handlerMock.Object);
+        var fetcher = new IpifyFetcher(httpClient);
+
+        await Assert.ThrowsAsync<TaskCanceledException>(() => fetcher.FetchIpAddressAsync());
     }
 }
